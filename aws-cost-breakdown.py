@@ -160,6 +160,20 @@ def main():
         help="Time period for cost calculation"
     )
 
+    st.sidebar.markdown("---")
+    st.sidebar.info("""
+    **What is a session?**
+    
+    1 session includes:
+    - Log in and view the dashboard
+    - Navigate to the people page
+    - Add one staff member
+    - Navigate to the staff page
+    - Add one document (5MB upload)
+    
+    Price estimates are based on actual usage data from production logs.
+    """)
+
     # Calculate costs
     results = calc_costs(company_users, active_users, sessions_per_day, days)
 
