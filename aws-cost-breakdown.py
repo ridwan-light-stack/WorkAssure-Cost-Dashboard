@@ -96,6 +96,11 @@ def calc_costs(company_users, active_users, sessions_per_day, days):
     total = lambda_total + apigw_total + rds_cost + \
         s3_total + data_transfer_total + cloudwatch_total
 
+    # For monthly projection: separate usage-based from accumulating costs
+    usage_based = lambda_total + apigw_total + rds_cost + data_transfer_total
+    s3_requests = s3_put_cost + s3_get_cost  # Scales linearly
+    accumulating = s3_storage_cost + cloudwatch_total  # Accumulates over time
+
     return {
         'invocations': total_invocations,
         'sessions': int(total_sessions),
@@ -105,7 +110,9 @@ def calc_costs(company_users, active_users, sessions_per_day, days):
         's3': s3_total,
         'data_transfer': data_transfer_total,
         'cloudwatch': cloudwatch_total,
-        'total': total
+        'total': total,
+        'usage_based': usage_based + s3_requests,
+        'accumulating': accumulating
     }
 
 
@@ -162,7 +169,23 @@ def main():
     with col1:
         st.metric("Total Cost", f"${results['total']:.2f}")
     with col2:
-        monthly_cost = (results['total'] / days) * 30
+        # Correct monthly projection: scale usage linearly, calculate storage for 30 days
+        if days == 30:
+            monthly_cost = results['total']
+        else:
+            # Scale usage-based costs linearly
+            monthly_usage = (results['usage_based'] / days) * 30
+            # Recalculate accumulating costs for 30 days
+            sessions_per_month = active_users * sessions_per_day * 30
+            s3_storage_monthly = (
+                (sessions_per_month * S3_FILE_SIZE_MB) / 1024) * S3_STORAGE_COST_PER_GB_MONTH
+            invoc_per_month = (36 + (4 * company_users)) * \
+                active_users * sessions_per_day * 30
+            logs_monthly = ((invoc_per_month * (AVG_LAMBDA_LOG_BYTES_PER_INVOCATION +
+                            AVG_APIGW_LOG_BYTES_PER_REQUEST)) / (1024**3))
+            cloudwatch_monthly = (logs_monthly * CLOUDWATCH_INGESTION_COST_PER_GB) + (
+                logs_monthly * CLOUDWATCH_STORAGE_COST_PER_GB_MONTH * (LOG_RETENTION_DAYS / 30))
+            monthly_cost = monthly_usage + s3_storage_monthly + cloudwatch_monthly
         st.metric("Monthly Projection", f"${monthly_cost:.2f}")
     with col3:
         st.metric("Total Invocations", f"{results['invocations']:,}")
