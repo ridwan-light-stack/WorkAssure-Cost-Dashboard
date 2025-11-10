@@ -183,23 +183,57 @@ def main():
     with col1:
         st.metric("Total Cost", f"${results['total']:.2f}")
     with col2:
-        # Correct monthly projection: scale usage linearly, calculate storage for 30 days
+        # Recompute a full 30-day month (apply monthly free tiers once)
         if days == 30:
             monthly_cost = results['total']
         else:
-            # Scale usage-based costs linearly
-            monthly_usage = (results['usage_based'] / days) * 30
-            # Recalculate accumulating costs for 30 days
-            sessions_per_month = active_users * sessions_per_day * 30
-            s3_storage_monthly = (
-                (sessions_per_month * S3_FILE_SIZE_MB) / 1024) * S3_STORAGE_COST_PER_GB_MONTH
-            invoc_per_month = (36 + (4 * company_users)) * \
-                active_users * sessions_per_day * 30
-            logs_monthly = ((invoc_per_month * (AVG_LAMBDA_LOG_BYTES_PER_INVOCATION +
-                            AVG_APIGW_LOG_BYTES_PER_REQUEST)) / (1024**3))
-            cloudwatch_monthly = (logs_monthly * CLOUDWATCH_INGESTION_COST_PER_GB) + (
-                logs_monthly * CLOUDWATCH_STORAGE_COST_PER_GB_MONTH * (LOG_RETENTION_DAYS / 30))
-            monthly_cost = monthly_usage + s3_storage_monthly + cloudwatch_monthly
+            sessions_pm = active_users * sessions_per_day * 30
+            invoc_per_session = 36 + (4 * company_users)
+            invocs_pm = invoc_per_session * sessions_pm
+
+            # Lambda (monthly, free tier once)
+            gb_seconds_pm = invocs_pm * \
+                (MEMORY_MB / 1024) * (DURATION_MS / 1000)
+            lambda_compute_pm = max(
+                0, gb_seconds_pm - LAMBDA_FREE_GB_SECONDS) * LAMBDA_COST_PER_GB_SEC
+            lambda_requests_pm = max(
+                0, invocs_pm - LAMBDA_FREE_REQUESTS) * LAMBDA_COST_PER_REQUEST
+            lambda_pm = lambda_compute_pm + lambda_requests_pm
+
+            # API Gateway (no free tier)
+            apigw_pm = invocs_pm * APIGW_COST_PER_REQUEST
+
+            # RDS (full month)
+            rds_pm = RDS_MONTHLY_COST
+
+            # S3 requests (monthly)
+            s3_put_pm = sessions_pm * (S3_PUT_COST_PER_1000 / 1000)
+            s3_get_pm = sessions_pm * (S3_GET_COST_PER_1000 / 1000)
+
+            # S3 storage — FULL RETAIN (upper bound)
+            s3_storage_gb_pm = (sessions_pm * S3_FILE_SIZE_MB) / 1024
+            s3_storage_pm = s3_storage_gb_pm * S3_STORAGE_COST_PER_GB_MONTH
+
+            # Data transfer (apply 1 GB/mo free once)
+            apigw_out_gb_pm = (invocs_pm * AVG_RESPONSE_SIZE_BYTES) / (1024**3)
+            apigw_out_billable_pm = max(
+                0, apigw_out_gb_pm - DATA_TRANSFER_OUT_FREE_GB)
+            apigw_xfer_pm = apigw_out_billable_pm * DATA_TRANSFER_OUT_COST_PER_GB
+            cross_az_gb_pm = (invocs_pm * CROSS_AZ_RATIO *
+                              (AVG_DB_QUERY_KB + AVG_DB_RESPONSE_KB)) / (1024**2)
+            cross_az_pm = cross_az_gb_pm * CROSS_AZ_COST_PER_GB
+            data_xfer_pm = apigw_xfer_pm + cross_az_pm
+
+            # CloudWatch logs (7-day retention)
+            logs_gb_pm = (invocs_pm * (AVG_LAMBDA_LOG_BYTES_PER_INVOCATION +
+                                       AVG_APIGW_LOG_BYTES_PER_REQUEST)) / (1024**3)
+            cw_ingest_pm = logs_gb_pm * CLOUDWATCH_INGESTION_COST_PER_GB
+            cw_storage_pm = (logs_gb_pm / 30 * LOG_RETENTION_DAYS) * \
+                CLOUDWATCH_STORAGE_COST_PER_GB_MONTH
+            cw_pm = cw_ingest_pm + cw_storage_pm
+
+            monthly_cost = lambda_pm + apigw_pm + rds_pm + \
+                (s3_put_pm + s3_get_pm + s3_storage_pm) + data_xfer_pm + cw_pm
         st.metric("Monthly Projection", f"${monthly_cost:.2f}")
     with col3:
         st.metric("Total Invocations", f"{results['invocations']:,}")
